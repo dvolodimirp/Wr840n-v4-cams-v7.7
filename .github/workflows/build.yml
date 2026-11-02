@@ -1,0 +1,105 @@
+name: Build OpenWrt 24.10 TL-WR840N v4 (USB + UVC webcams, mjpg-streamer)
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_ref:
+        description: "OpenWrt branch or tag (e.g. openwrt-24.10, v19.07.10)"
+        default: "openwrt-24.10"
+        required: true
+      lan_ip:
+        description: "Default LAN IP of the router (set on first boot while the LAN is still 192.168.1.1)"
+        default: "192.168.77.10"
+        required: true
+
+jobs:
+  build:
+    runs-on: ${{ contains(inputs.openwrt_ref, '19.07') && 'ubuntu-22.04' || 'ubuntu-24.04' }}
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies (19.07)
+        if: contains(inputs.openwrt_ref, '19.07')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential flex bison g++ gawk gettext git libelf-dev libncurses5-dev \
+            libncursesw5-dev libssl-dev python3 python-is-python3 python3-distutils python3-setuptools rsync \
+            subversion swig time unzip wget xsltproc zlib1g-dev file
+
+      - name: Install build dependencies (newer releases)
+        if: ${{ !contains(inputs.openwrt_ref, '19.07') }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+            gettext git libncurses-dev libssl-dev python3-setuptools rsync swig unzip zlib1g-dev file wget \
+            python3-distutils-extra libelf-dev
+
+      - name: Clone OpenWrt
+        run: git clone --depth 1 --branch "${{ inputs.openwrt_ref }}" https://github.com/openwrt/openwrt.git openwrt
+
+      - name: Feeds
+        working-directory: openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Patch mjpg-streamer (timeout recovery + fast YUYV->JPEG)
+        working-directory: openwrt
+        run: |
+          d=feeds/packages/multimedia/mjpg-streamer/patches
+          ls $d
+          cp ../patches/mjpg-streamer/*.patch $d/
+          ls $d
+
+      - name: Enable USB in the board DTS
+        working-directory: openwrt
+        run: bash ../scripts/enable-usb.sh
+
+      - name: Config
+        working-directory: openwrt
+        env:
+          LAN_IP: ${{ inputs.lan_ip }}
+        run: |
+          cp ../config.seed .config
+          cp -r ../files files
+          if ! echo "$LAN_IP" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+            echo "::error::lan_ip must look like 192.168.77.10"; exit 1
+          fi
+          sed -i "s|^LAN_IP=.*|LAN_IP=$LAN_IP|" files/etc/uci-defaults/98-cams-lan
+          grep -n "^LAN_IP=" files/etc/uci-defaults/98-cams-lan
+          chmod +x files/etc/init.d/cams files/etc/uci-defaults/* files/usr/sbin/* files/usr/lib/cams.sh files/etc/hotplug.d/usb/*
+          make defconfig
+          grep -E "tl-wr840n-v4|PACKAGE_(kmod-usb2|kmod-usb-ohci|kmod-video-uvc|mjpg-streamer|nftables-json)=" .config
+          grep -q "PACKAGE_mjpg-streamer=y" .config
+          grep -q "DEVICE_.*tl-wr840n-v4=y" .config
+
+      - name: Download sources
+        working-directory: openwrt
+        run: make download -j8
+
+      - name: Build
+        working-directory: openwrt
+        run: make -j$(nproc) || make -j1 V=s
+
+      - name: Collect images
+        run: |
+          mkdir out
+          d=openwrt/bin/targets/ramips/mt76x8
+          cp $d/*wr840n-v4*sysupgrade.bin out/
+          for f in $d/*wr840n-v4*factory.bin $d/*wr840n-v4*tftp-recovery.bin; do
+            [ -e "$f" ] && cp "$f" out/
+          done
+          cp $d/*wr840n-v4*.manifest out/ || true
+          (cd out && sha256sum *.bin > SHA256SUMS)
+          cp openwrt/.config out/config.used
+          ls -la out
+          s=$(stat -c %s out/*sysupgrade.bin); echo "sysupgrade size: $s of $((7808*1024)) bytes"
+          if [ "$s" -gt $((7808*1024)) ]; then
+            echo "::warning::sysupgrade image is larger than the 7808 KB limit; remove optional packages from config.seed"
+          fi
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: openwrt24-wr840n-v4-cams
+          path: out/*
