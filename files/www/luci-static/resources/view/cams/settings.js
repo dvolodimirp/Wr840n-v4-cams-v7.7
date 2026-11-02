@@ -22,7 +22,6 @@ return L.view.extend({
 
 	render: function(data) {
 		var listing = data[0];
-		var infoOn = uci.get('cams', 'defaults', 'info') === '1';
 		var svc = {};
 		String(data[2] || '').trim().split(/\s+/).forEach(function(kv) {
 			var a = kv.split('=');
@@ -98,8 +97,7 @@ return L.view.extend({
 					return fs.exec('/usr/sbin/cams-apply', []).then(function() {
 						ui.addNotification(null, E('p', 'Параметри зображення застосовано.'), 'info');
 					});
-				}),
-				infoOn ? E('a', { 'class': 'cbi-button cbi-button-link', 'href': L.url('admin', 'services', 'cams-info') }, 'Відкрити трафік потоків →') : ''
+				})
 			]),
 			E('p', { 'class': 'cbi-value-description' },
 				'«Активувати» вмикає автозапуск при завантаженні, watchdog і запускає потоки; «Деактивувати» вимикає автозапуск і зупиняє потоки. ' +
@@ -123,11 +121,6 @@ return L.view.extend({
 		/* ---------- general ---------- */
 		s = m.section(form.NamedSection, 'defaults', 'defaults', 'Загальне');
 		s.addremove = false;
-
-		o = s.option(form.Flag, 'info', 'Меню «Вебкамери: трафік»');
-		o.default = '0';
-		o.rmempty = false;
-		o.description = 'Додає пункт меню з живою статистикою потоків (трафік, глядачі) і вмикає лічильники байтів. Після збереження оновіть сторінку.';
 
 		o = s.option(form.DummyValue, '_other_pages', 'Інші сторінки');
 		o.rawhtml = true;
@@ -157,13 +150,13 @@ return L.view.extend({
 		o = s.taboption('stream', form.ListValue, 'fps', 'Частота кадрів');
 		[ '5', '10', '15', '20', '25', '30' ].forEach(function(v) { o.value(v); });
 		o.default = '10';
-		o.description = 'Береться з частот, які підтримує камера (зазвичай 5, 10, 15, 20...). 10 к/с для двох камер на 320x240 – прийнятно; вище – навантаження на процесор.';
+		o.description = 'Береться з частот, які підтримує камера (зазвичай 5, 10, 15, 20...). 10 к/с для двох камер на 320x240 прийнятно; вище навантажує процесор.';
 
 		o = s.taboption('stream', form.ListValue, 'rotate', 'Поворот зображення');
 		o.value('0', 'без повороту');
 		o.value('180', '180°');
 		o.default = '0';
-		o.description = 'Програмний поворот у mjpg-streamer. Застосовується з перезапуском потоку.';
+		o.description = 'Програмний поворот у mjpg-streamer (патч 060, без додаткового проходу по кадру). Застосовується з перезапуском потоку.';
 
 		o = s.taboption('stream', form.Value, 'port', 'Порт');
 		o.datatype = 'port';

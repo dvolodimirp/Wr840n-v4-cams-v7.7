@@ -54,19 +54,13 @@ start_service() {
     procd_set_param respawn 3600 5 0
     procd_close_instance
   done < "$LISTF"
-  /usr/sbin/cams-stats sync
   stream_hash > "$HASHF"
   ( sleep 8; /usr/sbin/cams-camctl apply; /usr/sbin/cams-apply ) >/dev/null 2>&1 &
-}
-
-stop_service() {
-  /usr/sbin/cams-stats teardown
 }
 
 reload_service() {
 
   /usr/sbin/cams-sync
-  /usr/sbin/cams-stats sync
   if [ "$(stream_hash)" = "$(cat "$HASHF" 2>/dev/null)" ]; then
     ( /usr/sbin/cams-camctl apply; /usr/sbin/cams-apply ) >/dev/null 2>&1 &
   else

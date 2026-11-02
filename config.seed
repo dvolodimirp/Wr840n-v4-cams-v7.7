@@ -16,9 +16,6 @@ CONFIG_PACKAGE_mjpg-streamer-input-uvc=y
 CONFIG_PACKAGE_mjpg-streamer-output-http=y
 CONFIG_PACKAGE_mjpg-streamer-output-file=y
 
-# per-stream byte counters for the traffic page (normally already pulled in by firewall4)
-CONFIG_PACKAGE_nftables-json=y
-
 # v4l2-ctl and libraries
 CONFIG_PACKAGE_v4l-utils=y
 CONFIG_PACKAGE_libv4l=y

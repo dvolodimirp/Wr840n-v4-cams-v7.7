@@ -12,22 +12,9 @@
       ]
     }
   },
-  "admin/services/cams-info": {
-    "title": "Вебкамери: трафік",
-    "order": 61,
-    "action": {
-      "type": "view",
-      "path": "cams/info"
-    },
-    "depends": {
-      "acl": [
-        "luci-app-cams"
-      ]
-    }
-  },
   "admin/services/cams-camctl": {
     "title": "Вебкамери: параметри камер",
-    "order": 62,
+    "order": 61,
     "action": {
       "type": "view",
       "path": "cams/camctl"

@@ -169,7 +169,7 @@ return L.view.extend({
 					'class': 'cbi-button cbi-button-action',
 					'click': ui.createHandlerFn(self, function() {
 						return fs.exec('/usr/sbin/cams-camctl', [ 'apply', '--force' ]).then(function() {
-							ui.addNotification(null, E('p', 'Збережені параметри записано в камери .'), 'info');
+							ui.addNotification(null, E('p', 'Збережені параметри записано в камери.'), 'info');
 						}).catch(function(e) {
 							ui.addNotification(null, E('p', 'Помилка: ' + e.message), 'danger');
 						});

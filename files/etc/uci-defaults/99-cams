@@ -7,7 +7,6 @@ if ! uci -q get cams.defaults >/dev/null; then
   uci set cams.defaults.res=320x240
   uci set cams.defaults.fps=10
   uci set cams.defaults.camctl=1
-  uci set cams.defaults.info=0
   uci commit cams
 fi
 grep -q cams-watchdog /etc/crontabs/root 2>/dev/null || echo "* * * * * /usr/sbin/cams-watchdog" >> /etc/crontabs/root
