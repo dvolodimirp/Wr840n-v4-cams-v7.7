@@ -1,0 +1,13 @@
+{
+	"admin/status/usbdiag": {
+		"title": "USB Diagnostics",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "usbdiag/index"
+		},
+		"depends": {
+			"acl": [ "luci-app-usbdiag" ]
+		}
+	}
+}

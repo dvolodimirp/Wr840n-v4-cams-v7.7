@@ -1,0 +1,10 @@
+{
+	"luci-app-usbdiag": {
+		"description": "USB diagnostics (read only)",
+		"read": {
+			"file": {
+				"/usr/sbin/usbdiag": [ "exec" ]
+			}
+		}
+	}
+}

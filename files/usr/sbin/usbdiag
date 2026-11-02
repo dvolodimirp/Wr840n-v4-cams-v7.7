@@ -1,0 +1,84 @@
+#!/bin/sh
+# usbdiag: read-only USB diagnostics for the LuCI page "USB Diagnostics" (no daemon, nothing is written anywhere).
+#   usbdiag tree     U|uptime, then D|... (devices/hubs) and P|... (hub ports)
+#   usbdiag events   U|uptime, then E|ts|bus|type|code|message  (from the kernel ring buffer, dmesg)
+# D|busid|parent|port|vid:pid|manufacturer|product|devnum|speed|driver|class|maxchild|interfaces|runtime|authorized|controller
+# P|hub|port|child busid|present(1/0)
+SYS=${SYSFS:-/sys}
+DEVS=$SYS/bus/usb/devices
+
+rd() { [ -r "$1" ] && tr -d '\r\n|' < "$1"; }
+drv() { l=$(readlink "$1/driver" 2>/dev/null) && basename "$l"; }
+
+tree() {
+  echo "U|$(cut -d' ' -f1 /proc/uptime)"
+  for d in "$DEVS"/*; do
+    b=${d##*/}
+    case "$b" in *:*) continue ;; esac
+    [ -e "$d/devnum" ] || continue
+    case "$b" in
+      usb*) parent=""; port=0; bus=${b#usb}
+            real=$(readlink -f "$d" 2>/dev/null)
+            hc=${real%/*}
+            ctrl="${hc##*/}/$(drv "$hc")" ;;
+      *)    case "$b" in
+              *.*) parent=${b%.*}; port=${b##*.} ;;
+              *)   parent="usb${b%%-*}"; port=${b##*-} ;;
+            esac
+            ctrl="" ;;
+    esac
+    ifs=""
+    for i in "$d":*; do
+      [ -e "$i/bInterfaceClass" ] || continue
+      ifs="$ifs${ifs:+,}$(rd "$i/bInterfaceClass")/$(drv "$i")"
+    done
+    mc=$(rd "$d/maxchild"); [ -n "$mc" ] || mc=0
+    echo "D|$b|$parent|$port|$(rd "$d/idVendor"):$(rd "$d/idProduct")|$(rd "$d/manufacturer")|$(rd "$d/product")|$(rd "$d/devnum")|$(rd "$d/speed")|$(drv "$d")|$(rd "$d/bDeviceClass")|$mc|$ifs|$(rd "$d/power/runtime_status")|$(rd "$d/authorized")|$ctrl"
+    if [ "$mc" -gt 0 ] 2>/dev/null; then
+      case "$b" in usb*) pre="${b#usb}-" ;; *) pre="$b." ;; esac
+      p=1
+      while [ "$p" -le "$mc" ]; do
+        pr=0; [ -d "$DEVS/$pre$p" ] && pr=1
+        echo "P|$b|$p|$pre$p|$pr"
+        p=$((p + 1))
+      done
+    fi
+  done
+}
+
+events() {
+  echo "U|$(cut -d' ' -f1 /proc/uptime)"
+  ${DMESG:-dmesg} 2>/dev/null | grep -Ei 'usb|uvcvideo|hub |ehci|ohci|xhci' | tail -n "${1:-500}" | awk '
+    {
+      ts = ""; msg = $0
+      if (match($0, /^\[ *[0-9]+\.[0-9]+\]/)) {
+        ts = substr($0, RSTART + 1, RLENGTH - 2); gsub(/ /, "", ts)
+        msg = substr($0, RLENGTH + 2)
+      }
+      bus = ""
+      if (match(msg, /(usb|hub) [0-9]+-[0-9]+(\.[0-9]+)*/)) {
+        bus = substr(msg, RSTART, RLENGTH); sub(/^(usb|hub) /, "", bus)
+      }
+      code = ""
+      if (match(msg, /(error|err =|errno) -[0-9]+/)) { code = substr(msg, RSTART, RLENGTH); sub(/^[^-]*/, "", code) }
+      else if (match(msg, /\(-[0-9]+\)/)) code = substr(msg, RSTART + 1, RLENGTH - 2)
+      type = ""
+      if (msg ~ /USB disconnect/) type = "disconnect"
+      else if (msg ~ /new .*USB device number/) type = "connect"
+      else if (msg ~ /reset .*USB device number/) type = "reset"
+      else if (msg ~ /over-?current/) type = "power"
+      else if (msg ~ /power cycle|port power|PORT_POWER|powering/) type = "power"
+      else if (msg ~ /uvcvideo/ && (code != "" || msg ~ /[Ff]ailed|timeout|timed out|not responding/)) type = "uvc"
+      else if (code != "" || msg ~ /Cannot enable|unable to enumerate|can.t set config|HC died|host controller halted|device not accepting address|descriptor read/) type = "error"
+      if (type == "") next
+      gsub(/\|/, " ", msg)
+      print "E|" ts "|" bus "|" type "|" code "|" msg
+    }'
+}
+
+case "$1" in
+  tree) tree ;;
+  events) events "$2" ;;
+  *) echo "usage: $0 tree|events [N]" >&2; exit 2 ;;
+esac
+exit 0

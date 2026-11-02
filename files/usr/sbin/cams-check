@@ -1,0 +1,15 @@
+#!/bin/sh
+# exit 0 if every enabled camera delivers a real frame (or none is enabled)
+. "${CAMS_LIB:-/usr/lib/cams.sh}"
+"$BIN/cams-list" > /tmp/cams.chk.list
+i=0
+while IFS='|' read -r dev sec port user pass res fps rest; do
+  i=$((i + 1))
+  url="http://127.0.0.1:$port/?action=snapshot"
+  [ -n "$user" ] && url="http://$user:$pass@127.0.0.1:$port/?action=snapshot"
+  f=/tmp/camchk.$i
+  rm -f "$f"
+  wget -q -T 10 -O "$f" "$url" >/dev/null 2>&1
+  [ -s "$f" ] || exit 1
+done < /tmp/cams.chk.list
+exit 0

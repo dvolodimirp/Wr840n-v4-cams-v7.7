@@ -1,0 +1,6 @@
+#!/bin/sh
+# Replaces the stock mjpg-streamer package hotplug script. The stock one runs
+# "/etc/init.d/mjpg-streamer start|stop" for EVERY usb event (hub, camera, each interface);
+# on this router that is a burst of shell+ubus processes at every re-enumeration.
+# Streams are managed by the "cams" service only.
+exit 0

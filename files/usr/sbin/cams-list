@@ -1,0 +1,35 @@
+#!/bin/sh
+# one line per enabled camera:
+# dev|sec|port|user|pass|res|fps|brightness|contrast|saturation|gamma|sharpness|powerline|name|rotate
+. "${CAMS_LIB:-/usr/lib/cams.sh}"
+used=" "
+for n in $(cam_nodes); do
+  sec=$(cam_sec "$n")
+  [ "$(cg "$sec" enabled)" = "0" ] && continue
+  p=$(cg "$sec" port)
+  [ -n "$p" ] && used="$used$p "
+done
+next=8080
+for n in $(cam_nodes); do
+  sec=$(cam_sec "$n")
+  [ "$(cg "$sec" enabled)" = "0" ] && continue
+  port=$(cg "$sec" port)
+  if [ -z "$port" ]; then
+    while :; do
+      case "$used" in
+        *" $next "*) next=$((next + 1)) ;;
+        *) break ;;
+      esac
+    done
+    port=$next
+    used="$used$next "
+  fi
+  user=$(cg "$sec" user)
+  pass=$(cg "$sec" pass)
+  if [ -z "$user" ] || [ -z "$pass" ]; then user=""; pass=""; fi
+  res=$(cg "$sec" res); [ -n "$res" ] || res=320x240
+  fps=$(cg "$sec" fps); [ -n "$fps" ] || fps=10
+  rot=$(cg "$sec" rotate); [ "$rot" = "180" ] || rot=0
+  echo "/dev/$(basename "$n")|$sec|$port|$user|$pass|$res|$fps|$(cg "$sec" brightness)|$(cg "$sec" contrast)|$(cg "$sec" saturation)|$(cg "$sec" gamma)|$(cg "$sec" sharpness)|$(cg "$sec" powerline)|$(cat "$n/name" | tr -d '|')|$rot"
+done
+exit 0

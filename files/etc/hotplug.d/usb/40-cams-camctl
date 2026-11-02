@@ -1,0 +1,11 @@
+#!/bin/sh
+# a camera was (re)plugged: write the saved global parameters into it (cams-camctl)
+[ "$ACTION" = "add" ] || exit 0
+[ "$DEVTYPE" = "usb_interface" ] || exit 0
+# 14/1/* = video control interface: exactly one event per camera
+case "$INTERFACE" in 14/1/*) ;; *) exit 0 ;; esac
+[ "$(uci -q get cams.defaults.camctl)" = "0" ] && exit 0
+# one waiting worker is enough, it writes every camera present when it wakes up
+mkdir /tmp/cams-camctl.pend 2>/dev/null || exit 0
+( sleep 5; rmdir /tmp/cams-camctl.pend; /usr/sbin/cams-camctl apply ) >/dev/null 2>&1 </dev/null &
+exit 0

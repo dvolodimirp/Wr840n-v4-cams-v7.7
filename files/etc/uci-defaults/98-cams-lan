@@ -1,0 +1,13 @@
+#!/bin/sh
+# default LAN address of this build; applied only while the LAN still has the stock 192.168.1.1
+# (the workflow input "lan_ip" rewrites the next line)
+LAN_IP=192.168.77.10
+cur=$(uci -q get network.lan.ipaddr)
+case "$cur" in
+  192.168.1.1|192.168.1.1/*)
+    uci set network.lan.ipaddr="$LAN_IP"
+    uci set network.lan.netmask='255.255.255.0'
+    uci commit network
+    ;;
+esac
+exit 0

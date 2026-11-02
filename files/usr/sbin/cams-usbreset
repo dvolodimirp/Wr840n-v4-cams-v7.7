@@ -1,0 +1,18 @@
+#!/bin/sh
+# re-enumerate the whole USB bus (what a replug does) and wait for the cameras to come back
+logger -t cams-usbreset "resetting USB bus"
+for h in /sys/bus/usb/devices/usb*; do
+  [ -w "$h/authorized" ] && echo 0 > "$h/authorized"
+done
+sleep 3
+for h in /sys/bus/usb/devices/usb*; do
+  [ -w "$h/authorized" ] && echo 1 > "$h/authorized"
+done
+n=0
+while [ "$n" -lt 20 ]; do
+  c=$(ls -d /sys/class/video4linux/video* 2>/dev/null | wc -l)
+  [ "$c" -ge 2 ] && break
+  sleep 1; n=$((n + 1))
+done
+sleep 3
+exit 0

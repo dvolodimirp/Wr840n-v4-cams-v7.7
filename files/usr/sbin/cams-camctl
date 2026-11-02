@@ -1,0 +1,146 @@
+#!/bin/sh
+# Global camera parameters: the values saved in /etc/config/cams (sections "camctl", one per camera model)
+# are written into the camera every time it is (re)plugged,.
+#   cams-camctl list                busid|vid:pid|name|video node|state(local)|section
+#   cams-camctl sync                creates a settings section for every newly detected camera
+#   cams-camctl controls NODE       name|type|min|max|step|default|value|flags|menu items (idx=label;...)
+#   cams-camctl apply [--force] [BUSID]
+SYS=${SYSFS:-/sys}
+DEVS=$SYS/bus/usb/devices
+LOCK=${CAMCTL_LOCK:-/tmp/cams-camctl.lock}
+TMP=${CAMCTL_TMP:-/tmp}
+
+video_busids() {
+  for i in "$DEVS"/*:*; do
+    [ -e "$i/bInterfaceClass" ] || continue
+    [ "$(cat "$i/bInterfaceClass" 2>/dev/null)" = "0e" ] || continue
+    basename "$i" | cut -d: -f1
+  done | sort -u
+}
+
+# capture node (/dev/videoN) of a camera that is driven by uvcvideo on this router
+node_of() {
+  for v in "$DEVS/$1":*/video4linux/video*; do
+    [ -e "$v/index" ] || continue
+    [ "$(cat "$v/index" 2>/dev/null)" = "0" ] || continue
+    echo "/dev/$(basename "$v")"
+    return 0
+  done
+  return 1
+}
+
+sec_of() {
+  printf 'cc_%s' "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_' | tr 'A-Z' 'a-z')"
+}
+
+product_of() { cat "$DEVS/$1/product" 2>/dev/null | tr -d '|'; }
+
+# v4l2-ctl -L -> one line per control (int, bool, menu, intmenu only; read-only ones are skipped)
+controls_of() {
+  v4l2-ctl -d "$1" -L 2>/dev/null | awk '
+    function flush() {
+      if (name != "" && (type == "int" || type == "bool" || type == "menu" || type == "intmenu") && flags !~ /read-only/)
+        print name "|" type "|" min "|" max "|" step "|" def "|" val "|" flags "|" items
+      name = ""
+    }
+    $2 ~ /^0x[0-9a-f]+$/ {
+      flush()
+      name = $1; type = $3; gsub(/[()]/, "", type)
+      min = ""; max = ""; step = ""; def = ""; val = ""; flags = ""; items = ""
+      for (i = 4; i <= NF; i++) {
+        split($i, kv, "=")
+        if (kv[1] == "min") min = kv[2]
+        else if (kv[1] == "max") max = kv[2]
+        else if (kv[1] == "step") step = kv[2]
+        else if (kv[1] == "default") def = kv[2]
+        else if (kv[1] == "value" && val == "") val = kv[2]
+        else if (kv[1] == "flags") flags = kv[2]
+      }
+      next
+    }
+    /^[ \t]+-?[0-9]+: / && name != "" {
+      s = $0; sub(/^[ \t]+/, "", s)
+      idx = s; sub(/:.*/, "", idx)
+      lab = s; sub(/^-?[0-9]+: /, "", lab); gsub(/[|;=]/, " ", lab)
+      items = items (items == "" ? "" : ";") idx "=" lab
+      next
+    }
+    END { flush() }'
+}
+
+apply_one() {
+  b=$1
+  node=$(node_of "$b") || { logger -t cams-camctl "$b: no video node (camera not ready), skipped"; return 0; }
+  product=$(product_of "$b")
+  sec=$(sec_of "$product")
+  [ -n "$(uci -q get "cams.$sec")" ] || return 0
+  f=$TMP/cams.camctl.$$
+  controls_of "$node" > "$f"
+  cnt=0
+  # first switches and menus (auto exposure, auto white balance, power line...), then the numbers
+  for pass in 1 2; do
+    while IFS='|' read -r n t rest; do
+      case "$t" in
+        int) [ "$pass" = 2 ] || continue ;;
+        *) [ "$pass" = 1 ] || continue ;;
+      esac
+      v=$(uci -q get "cams.$sec.$n")
+      [ -n "$v" ] || continue
+      if v4l2-ctl -d "$node" -c "$n=$v" >/dev/null 2>&1; then
+        cnt=$((cnt + 1))
+      else
+        logger -t cams-camctl "$product: cannot set $n=$v"
+      fi
+    done < "$f"
+  done
+  rm -f "$f"
+  [ "$cnt" -gt 0 ] && logger -t cams-camctl "$product: wrote $cnt parameter(s) into the camera"
+  return 0
+}
+
+case "$1" in
+  list)
+    for b in $(video_busids); do
+      st=local
+      p=$(product_of "$b")
+      echo "$b|$(cat "$DEVS/$b/idVendor" 2>/dev/null):$(cat "$DEVS/$b/idProduct" 2>/dev/null)|$p|$(node_of "$b")|$st|$(sec_of "$p")"
+    done
+    ;;
+  sync)
+    [ -f "${CAMS_CFG:-/etc/config/cams}" ] || touch "${CAMS_CFG:-/etc/config/cams}"
+    changed=0
+    for b in $(video_busids); do
+      p=$(product_of "$b")
+      sec=$(sec_of "$p")
+      [ -n "$(uci -q get "cams.$sec")" ] && continue
+      uci -q set "cams.$sec=camctl"
+      uci -q set "cams.$sec.name=$p"
+      changed=1
+    done
+    [ "$changed" = 1 ] && uci -q commit cams
+    ;;
+  controls)
+    [ -n "$2" ] || exit 2
+    controls_of "$2"
+    ;;
+  apply)
+    force=0
+    if [ "$2" = "--force" ]; then force=1; shift; fi
+    [ "$force" = 1 ] || [ "$(uci -q get cams.defaults.camctl)" != "0" ] || exit 0
+    n=0
+    while ! mkdir "$LOCK" 2>/dev/null; do
+      n=$((n + 1)); [ "$n" -gt 20 ] && break; sleep 1
+    done
+    if [ -n "$2" ]; then
+      apply_one "$2"
+    else
+      for b in $(video_busids); do apply_one "$b"; done
+    fi
+    rmdir "$LOCK" 2>/dev/null
+    ;;
+  *)
+    echo "usage: $0 list|sync|controls NODE|apply [--force] [BUSID]" >&2
+    exit 2
+    ;;
+esac
+exit 0

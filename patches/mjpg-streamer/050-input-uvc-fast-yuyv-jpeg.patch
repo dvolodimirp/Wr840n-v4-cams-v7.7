@@ -1,0 +1,85 @@
+--- a/plugins/input_uvc/jpeg_utils.c
++++ b/plugins/input_uvc/jpeg_utils.c
+@@ -126,6 +126,72 @@
+     dest->written = written;
+ }
+ 
++/* Fast YUYV path: hand YCbCr 4:2:0 planes straight to libjpeg (raw_data_in),
++ * skipping the per-pixel YUV->RGB->YCbCr round trip. */
++static int compress_yuyv_fast(struct vdIn *vd, unsigned char *buffer, int size, int quality)
++{
++    struct jpeg_compress_struct cinfo;
++    struct jpeg_error_mgr jerr;
++    int w = vd->width, h = vd->height, i, x, y0, written = 0;
++    int cw = (w + 1) / 2, wp = (w + 15) & ~15, cwp = (cw + 7) & ~7;
++    unsigned char *yuyv = vd->framebuffer;
++    unsigned char *yb = malloc((size_t)wp * 16), *cb = malloc((size_t)cwp * 8), *cr = malloc((size_t)cwp * 8);
++    JSAMPROW yr[16], cbr[8], crr[8];
++    JSAMPARRAY planes[3] = { yr, cbr, crr };
++
++    if (!yb || !cb || !cr) { free(yb); free(cb); free(cr); return 0; }
++
++    cinfo.err = jpeg_std_error(&jerr);
++    jpeg_create_compress(&cinfo);
++    dest_buffer(&cinfo, buffer, size, &written);
++    cinfo.image_width = w;
++    cinfo.image_height = h;
++    cinfo.input_components = 3;
++    cinfo.in_color_space = JCS_YCbCr;
++    jpeg_set_defaults(&cinfo);
++    jpeg_set_colorspace(&cinfo, JCS_YCbCr);
++    cinfo.raw_data_in = TRUE;
++    cinfo.comp_info[0].h_samp_factor = 2;
++    cinfo.comp_info[0].v_samp_factor = 2;
++    cinfo.comp_info[1].h_samp_factor = 1;
++    cinfo.comp_info[1].v_samp_factor = 1;
++    cinfo.comp_info[2].h_samp_factor = 1;
++    cinfo.comp_info[2].v_samp_factor = 1;
++    cinfo.dct_method = JDCT_IFAST;
++    jpeg_set_quality(&cinfo, quality, TRUE);
++    jpeg_start_compress(&cinfo, TRUE);
++
++    for (i = 0; i < 16; i++) yr[i] = yb + (size_t)i * wp;
++    for (i = 0; i < 8; i++) { cbr[i] = cb + (size_t)i * cwp; crr[i] = cr + (size_t)i * cwp; }
++
++    for (y0 = 0; y0 < h; y0 += 16) {
++        for (i = 0; i < 16; i++) {
++            int sy = y0 + i; const unsigned char *s; unsigned char *d = yr[i];
++            if (sy >= h) sy = h - 1;
++            s = yuyv + (size_t)sy * w * 2;
++            for (x = 0; x < cw; x++) { d[2*x] = s[4*x]; d[2*x+1] = s[4*x+2]; }
++            for (x = w; x < wp; x++) d[x] = d[w - 1];
++        }
++        for (i = 0; i < 8; i++) {
++            int sy0 = y0 + 2*i, sy1 = sy0 + 1; const unsigned char *s0, *s1;
++            if (sy0 >= h) sy0 = h - 1;
++            if (sy1 >= h) sy1 = h - 1;
++            s0 = yuyv + (size_t)sy0 * w * 2; s1 = yuyv + (size_t)sy1 * w * 2;
++            for (x = 0; x < cw; x++) {
++                cbr[i][x] = (s0[4*x+1] + s1[4*x+1] + 1) >> 1;
++                crr[i][x] = (s0[4*x+3] + s1[4*x+3] + 1) >> 1;
++            }
++            for (x = cw; x < cwp; x++) { cbr[i][x] = cbr[i][cw - 1]; crr[i][x] = crr[i][cw - 1]; }
++        }
++        jpeg_write_raw_data(&cinfo, planes, 16);
++    }
++
++    jpeg_finish_compress(&cinfo);
++    jpeg_destroy_compress(&cinfo);
++    free(yb); free(cb); free(cr);
++    return written;
++}
++
+ /******************************************************************************
+ Description.: yuv2jpeg function is based on compress_yuyv_to_jpeg written by
+               Gabriel A. Devenyi.
+@@ -147,6 +213,9 @@
+     int z;
+     static int written;
+ 
++    if (vd->formatIn == V4L2_PIX_FMT_YUYV && (vd->width & 1) == 0)
++        return compress_yuyv_fast(vd, buffer, size, quality);
++
+     line_buffer = calloc(vd->width * 3, 1);
+     yuyv = vd->framebuffer;
+ 

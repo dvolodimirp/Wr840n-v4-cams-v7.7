@@ -1,0 +1,76 @@
+#!/bin/sh /etc/rc.common
+# UVC webcams -> MJPEG over HTTP (mjpg-streamer, one process per camera).
+# Settings: /etc/config/cams (LuCI: Services -> Webcams)
+START=99
+USE_PROCD=1
+HASHF=/tmp/cams.streamhash
+LISTF=/tmp/cams.list
+
+# hash of everything that needs a stream restart (not brightness etc.): fields 1-7 and rotate
+stream_hash() {
+  /usr/sbin/cams-list | cut -d'|' -f1-7,15 | md5sum | cut -d' ' -f1
+}
+
+service_triggers() {
+  procd_add_reload_trigger cams
+}
+
+boot() {
+  (
+    cut -d. -f1 /proc/uptime > /tmp/cams.lock
+    n=0
+    while [ "$n" -lt 40 ] && ! ls /sys/class/video4linux/video* >/dev/null 2>&1; do
+      sleep 1; n=$((n + 1))
+    done
+    sleep 3
+    try=0
+    while [ "$try" -lt 4 ]; do
+      /etc/init.d/cams stop >/dev/null 2>&1
+      killall mjpg_streamer >/dev/null 2>&1
+      sleep 2
+      [ "$try" -ge 2 ] && /usr/sbin/cams-usbreset
+      /etc/init.d/cams start
+      sleep 12
+      /usr/sbin/cams-check && break
+      logger -t cams "start attempt $try failed, retrying"
+      try=$((try + 1))
+    done
+    rm -f /tmp/cams.lock
+  ) >/dev/null 2>&1 &
+}
+
+start_service() {
+  /usr/sbin/cams-sync
+  /usr/sbin/cams-list > "$LISTF"
+  while IFS='|' read -r dev sec port user pass res fps br co sa ga sp pl name rot; do
+    extra=""
+    [ "$rot" = "180" ] && extra=" -swrot180"
+    out="output_http.so -p $port"
+    [ -n "$user" ] && out="$out -c $user:$pass"
+    procd_open_instance "cam$port"
+    procd_set_param command /usr/bin/mjpg_streamer \
+      -i "input_uvc.so -d $dev -r $res -f $fps -y -n$extra" \
+      -o "$out"
+    procd_set_param respawn 3600 5 0
+    procd_close_instance
+  done < "$LISTF"
+  /usr/sbin/cams-stats sync
+  stream_hash > "$HASHF"
+  ( sleep 8; /usr/sbin/cams-camctl apply; /usr/sbin/cams-apply ) >/dev/null 2>&1 &
+}
+
+stop_service() {
+  /usr/sbin/cams-stats teardown
+}
+
+reload_service() {
+
+  /usr/sbin/cams-sync
+  /usr/sbin/cams-stats sync
+  if [ "$(stream_hash)" = "$(cat "$HASHF" 2>/dev/null)" ]; then
+    ( /usr/sbin/cams-camctl apply; /usr/sbin/cams-apply ) >/dev/null 2>&1 &
+  else
+    stop
+    start
+  fi
+}

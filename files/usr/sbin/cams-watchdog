@@ -1,0 +1,33 @@
+#!/bin/sh
+# cron, every minute: restart the streams if a camera stopped delivering frames.
+# A second failure in a row means the USB bus is wedged: re-enumerate it as well.
+LOCK=/tmp/cams.lock
+FAILS=/tmp/cams.fails
+# the stream service is switched off on purpose (menu: stopped / deactivated)
+[ -e /tmp/cams.manualstop ] && exit 0
+/etc/init.d/cams enabled || exit 0
+now=$(cut -d. -f1 /proc/uptime)
+if [ -f "$LOCK" ]; then
+  t=$(cat "$LOCK" 2>/dev/null)
+  [ -n "$t" ] && [ $((now - t)) -ge 0 ] && [ $((now - t)) -lt 300 ] && exit 0
+fi
+ls /sys/class/video4linux/video* >/dev/null 2>&1 || exit 0
+if /usr/sbin/cams-check; then
+  rm -f "$FAILS"
+  exit 0
+fi
+echo "$now" > "$LOCK"
+n=$(cat "$FAILS" 2>/dev/null); [ -n "$n" ] || n=0
+n=$((n + 1)); echo "$n" > "$FAILS"
+/etc/init.d/cams stop >/dev/null 2>&1
+killall mjpg_streamer >/dev/null 2>&1
+sleep 2
+if [ "$n" -ge 2 ]; then
+  logger -t cams-watchdog "streams still dead after restart, resetting USB"
+  /usr/sbin/cams-usbreset
+else
+  logger -t cams-watchdog "no frame from a camera, restarting streams"
+fi
+/etc/init.d/cams start
+sleep 15
+rm -f "$LOCK"

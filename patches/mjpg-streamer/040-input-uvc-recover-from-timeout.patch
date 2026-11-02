@@ -1,0 +1,56 @@
+--- a/plugins/input_uvc/input_uvc.c
++++ b/plugins/input_uvc/input_uvc.c
+@@ -673,6 +673,7 @@
+         goto endloop;
+     }
+ 
++    int fail_count = 0;
+     while(!pglobal->stop) {
+         while(pcontext->videoIn->streamingState == STREAMING_PAUSED) {
+             usleep(1); // maybe not the best way so FIXME
+@@ -706,14 +707,11 @@
+             goto endloop;
+         } else if (sel == 0) {
+             IPRINT("select() timeout\n");
+-            if (dv_timings) {
+-                if (setResolution(pcontext->videoIn, pcontext->videoIn->width, pcontext->videoIn->height) < 0) {
+-                    goto endloop;
+-                }
+-                continue;
+-            } else {
++            /* try to restart the capture in place; give up (exit, procd respawns) after 3 failures in a row */
++            if (++fail_count > 3 || setResolution(pcontext->videoIn, pcontext->videoIn->width, pcontext->videoIn->height) < 0) {
+                 goto endloop;
+             }
++            continue;
+         }
+ 
+         if (FD_ISSET(pcontext->videoIn->fd, &rd_fds)) {
+@@ -721,8 +719,12 @@
+             /* grab a frame */
+             if(uvcGrab(pcontext->videoIn) < 0) {
+                 IPRINT("Error grabbing frames\n");
+-                goto endloop;
++                if (++fail_count > 3 || setResolution(pcontext->videoIn, pcontext->videoIn->width, pcontext->videoIn->height) < 0) {
++                    goto endloop;
++                }
++                continue;
+             }
++            fail_count = 0;
+ 
+             if ( every_count < every - 1 ) {
+                 DBG("dropping %d frame for every=%d\n", every_count + 1, every);
+@@ -828,6 +830,13 @@
+ 
+ endloop:
+ 
++    if (!pglobal->stop) {
++        /* The input died on its own. Freeing buffers while the output plugins
++         * still use them crashes the process, so terminate at once and let
++         * procd (respawn) start a clean instance. */
++        IPRINT("input failed, exiting for respawn\n");
++        _exit(1);
++    }
+     DBG("leaving input thread, calling cleanup function now\n");
+     pthread_cleanup_pop(1);
+ 

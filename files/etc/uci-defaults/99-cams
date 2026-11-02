@@ -1,0 +1,20 @@
+#!/bin/sh
+# first boot: camera service defaults, watchdog, Ukrainian LuCI
+touch /etc/config/cams
+chmod 600 /etc/config/cams
+if ! uci -q get cams.defaults >/dev/null; then
+  uci set cams.defaults=defaults
+  uci set cams.defaults.res=320x240
+  uci set cams.defaults.fps=10
+  uci set cams.defaults.camctl=1
+  uci set cams.defaults.info=0
+  uci commit cams
+fi
+grep -q cams-watchdog /etc/crontabs/root 2>/dev/null || echo "* * * * * /usr/sbin/cams-watchdog" >> /etc/crontabs/root
+/etc/init.d/cron enable
+/etc/init.d/cams enable
+# the stock mjpg-streamer service is not used (streams are started by "cams")
+[ -x /etc/init.d/mjpg-streamer ] && /etc/init.d/mjpg-streamer disable
+uci -q set luci.main.lang=uk
+uci -q commit luci
+exit 0

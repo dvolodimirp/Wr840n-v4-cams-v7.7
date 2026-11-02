@@ -1,0 +1,21 @@
+#!/bin/sh
+# creates a settings section for every newly detected camera
+. "${CAMS_LIB:-/usr/lib/cams.sh}"
+[ -f "$CFG" ] || touch "$CFG"
+dres=$(cg defaults res); [ -n "$dres" ] || dres=352x288
+dfps=$(cg defaults fps); [ -n "$dfps" ] || dfps=5
+changed=0
+for n in $(cam_nodes); do
+  sec=$(cam_sec "$n")
+  name=$(cat "$n/name")
+  [ -n "$(uci -q get "cams.$sec")" ] && continue
+  uci set "cams.$sec=camera"
+  uci set "cams.$sec.name=$name"
+  uci set "cams.$sec.enabled=1"
+  uci set "cams.$sec.res=$dres"
+  uci set "cams.$sec.fps=$dfps"
+  case "$name" in *"HP Webcam"*) uci set "cams.$sec.brightness=70" ;; esac
+  changed=1
+done
+[ "$changed" = 1 ] && uci commit cams
+exit 0

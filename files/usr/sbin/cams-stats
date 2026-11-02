@@ -1,0 +1,104 @@
+#!/bin/sh
+# Stream statistics for the "Webcams: traffic" page.
+#
+#   cams-stats            print one snapshot (read by the LuCI page every few seconds)
+#   cams-stats sync       info page on  -> install byte counters, off -> remove them
+#   cams-stats teardown   remove the byte counters
+#
+# Snapshot format (pipe separated, one line per record):
+#   T|uptime_s|load1|mem_avail_kB|mem_total_kB|counters(1|0)
+#   C|name|dev|port|engine|res|fps_req|tx_bytes|tx_pkts|conns|online|cap_fps|enc_fps|clients|client_fps|note
+#
+# Pipeline stages ("steps"):
+#   network  tx_bytes  bytes sent from the router to the viewers      (nftables counter, port = camera port)
+# mjpg-streamer has no state interface: only the network step and connections are filled in
+# (its own per-stage numbers come from MJPG_STATS=1 in the log).
+. "${CAMS_LIB:-/usr/lib/cams.sh}"
+PORTSF=/tmp/cams.statports
+TABLE=cams_stat
+
+have_nft() { command -v nft >/dev/null 2>&1; }
+
+teardown() {
+  have_nft && nft delete table inet "$TABLE" >/dev/null 2>&1
+  rm -f "$PORTSF"
+  return 0
+}
+
+setup() {
+  have_nft || { logger -t cams-stats "nft not found, byte counters unavailable"; return 0; }
+  ports=$("$BIN/cams-list" | cut -d'|' -f3 | sort -n | tr '\n' ' ')
+  if [ -f "$PORTSF" ] && [ "$(cat "$PORTSF")" = "$ports" ] && nft list table inet "$TABLE" >/dev/null 2>&1; then
+    return 0
+  fi
+  nft delete table inet "$TABLE" >/dev/null 2>&1
+  {
+    echo "table inet $TABLE {"
+    echo "  chain out {"
+    echo "    type filter hook output priority 0; policy accept;"
+    for p in $ports; do echo "    tcp sport $p counter"; done
+    echo "  }"
+    echo "}"
+  } | nft -f - >/dev/null 2>&1 && echo "$ports" > "$PORTSF" || logger -t cams-stats "failed to install nft counters"
+  return 0
+}
+
+case "$1" in
+  sync)
+    if [ "$(cg defaults info)" = "1" ]; then setup; else teardown; fi
+    exit 0 ;;
+  teardown)
+    teardown; exit 0 ;;
+esac
+
+# ---------- snapshot ----------
+up=$(cut -d' ' -f1 /proc/uptime)
+load=$(cut -d' ' -f1 /proc/loadavg)
+mt=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+ma=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+[ -n "$ma" ] || ma=$(awk '/^MemFree:/ {print $2}' /proc/meminfo)
+
+cnt_ok=0
+CNT=""
+if have_nft; then
+  CNT=$(nft list chain inet "$TABLE" out 2>/dev/null | awk '
+    /sport/ {
+      p = ""; k = ""; b = ""
+      for (i = 1; i <= NF; i++) {
+        if ($i == "sport") p = $(i + 1)
+        if ($i == "packets") k = $(i + 1)
+        if ($i == "bytes") b = $(i + 1)
+      }
+      if (p != "") print p, k, b
+    }')
+  [ -n "$CNT" ] && cnt_ok=1
+fi
+echo "T|$up|$load|$ma|$mt|$cnt_ok"
+
+# established client connections to a local port, loopback (our own checks/polls) excluded
+conns() {
+  hex=$(printf '%04X' "$1")
+  cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v h="$hex" '
+    $4 == "01" {
+      n = split($2, a, ":")
+      if (a[n] != h) next
+      r = $3
+      if (r ~ /^0100007F:/ || r ~ /^0000000000000000FFFF00000100007F:/ || r ~ /^00000000000000000000000001000000:/) next
+      c++
+    }
+    END { print c + 0 }'
+}
+
+"$BIN/cams-list" > /tmp/cams.stats.list
+while IFS='|' read -r dev sec port user pass res fps br co sa ga sp pl name rot; do
+  eng=mjpg; note=""
+  pk=""; by=""
+  if [ -n "$CNT" ]; then
+    set -- $(printf '%s\n' "$CNT" | awk -v p="$port" '$1 == p {print $2, $3; exit}')
+    pk=$1; by=$2
+  fi
+  cn=$(conns "$port")
+  on=""; cap=""; enc=""; cl=""; cfps=""
+  echo "C|$name|$dev|$port|$eng|$res|$fps|$by|$pk|$cn|$on|$cap|$enc|$cl|$cfps|$note"
+done < /tmp/cams.stats.list
+exit 0

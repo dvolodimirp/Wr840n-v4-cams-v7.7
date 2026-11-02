@@ -1,0 +1,41 @@
+#!/bin/sh
+# service control of the stream service ("cams": mjpg-streamer), used by the LuCI menu.
+#   cams-svc status      autostart= running= mode= stopped= mjpg=
+#   cams-svc activate    autostart on + start now;  cams-svc deactivate   autostart off + stop
+#   cams-svc start | stop | restart
+# A manual stop leaves /tmp/cams.manualstop so that the watchdog does not restart the streams behind your back.
+STOPF=${CAMS_STOPF:-/tmp/cams.manualstop}
+INIT=${CAMS_INIT:-/etc/init.d}
+
+detach() { ( "$@" ) >/dev/null 2>&1 </dev/null & }
+
+case "$1" in
+  status)
+    au=0; "$INIT/cams" enabled >/dev/null 2>&1 && au=1
+    run=0; pidof mjpg_streamer >/dev/null 2>&1 && run=1
+    mode=stream
+    hold=0; [ -e "$STOPF" ] && hold=1
+    mj=0; [ -x /usr/bin/mjpg_streamer ] && mj=1
+    echo "autostart=$au running=$run mode=$mode stopped=$hold mjpg=$mj"
+    ;;
+  activate)
+    detach sh -c "rm -f '$STOPF'; $INIT/cron enable; $INIT/cams enable; $INIT/cams restart"
+    ;;
+  deactivate)
+    detach sh -c "touch '$STOPF'; $INIT/cams disable; $INIT/cams stop"
+    ;;
+  start)
+    detach sh -c "rm -f '$STOPF'; $INIT/cams start"
+    ;;
+  stop)
+    detach sh -c "touch '$STOPF'; $INIT/cams stop"
+    ;;
+  restart)
+    detach sh -c "rm -f '$STOPF'; $INIT/cams restart"
+    ;;
+  *)
+    echo "usage: $0 status|activate|deactivate|start|stop|restart" >&2
+    exit 2
+    ;;
+esac
+exit 0

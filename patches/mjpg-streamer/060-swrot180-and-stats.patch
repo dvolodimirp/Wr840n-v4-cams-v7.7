@@ -1,0 +1,203 @@
+--- a/plugins/input_uvc/input_uvc.c
++++ b/plugins/input_uvc/input_uvc.c
+@@ -38,6 +38,7 @@
+ #include <getopt.h>
+ #include <pthread.h>
+ #include <syslog.h>
++#include <time.h>
+ 
+ #include <linux/types.h>          /* for videodev2.h */
+ #include <linux/videodev2.h>
+@@ -75,6 +76,14 @@
+ static struct timeval timestamp;
+ static int softfps = -1;
+ static unsigned int timeout = 5;
++
++/* MJPG_STATS=1 in the environment: log per-stage timing every 5 s */
++static long long now_us(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (long long)ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
++}
+ static unsigned int dv_timings = 0;
+ 
+ static const struct {
+@@ -215,6 +224,7 @@
+             {"softfps", required_argument, 0, 0},
+             {"timeout", required_argument, 0, 0},
+             {"dv_timings", no_argument, 0, 0},
++            {"swrot180", no_argument, 0, 0},
+             {0, 0, 0, 0}
+         };
+ 
+@@ -387,6 +397,9 @@
+             DBG("case 42\n");
+             dv_timings = 1;
+             break;
++        case 43:
++            jpeg_sw_rot180 = 1;
++            break;
+        default:
+            DBG("default case\n");
+            help();
+@@ -674,6 +687,10 @@
+     }
+ 
+     int fail_count = 0;
++    int stats_on = getenv("MJPG_STATS") != NULL;
++    long long st_t0 = now_us(), t_a, t_b;
++    long long st_sel = 0, st_lock = 0, st_comp = 0;
++    int st_grab = 0, st_done = 0;
+     while(!pglobal->stop) {
+         while(pcontext->videoIn->streamingState == STREAMING_PAUSED) {
+             usleep(1); // maybe not the best way so FIXME
+@@ -696,7 +713,9 @@
+         tv.tv_sec = timeout;
+         tv.tv_usec = 0;
+ 
++        t_a = stats_on ? now_us() : 0;
+         int sel = select(pcontext->videoIn->fd + 1, &rd_fds, &wr_fds, &ex_fds, &tv);
++        if (stats_on) st_sel += now_us() - t_a;
+         DBG("select() = %d\n", sel);
+ 
+         if (sel < 0) {
+@@ -725,6 +744,7 @@
+                 continue;
+             }
+             fail_count = 0;
++            st_grab++;
+ 
+             if ( every_count < every - 1 ) {
+                 DBG("dropping %d frame for every=%d\n", every_count + 1, every);
+@@ -772,7 +792,9 @@
+             }
+ 
+             /* copy JPG picture to global buffer */
++            t_a = stats_on ? now_us() : 0;
+             pthread_mutex_lock(&pglobal->in[pcontext->id].db);
++            if (stats_on) st_lock += now_us() - t_a;
+ 
+             /*
+              * If capturing in YUV mode convert to JPEG now.
+@@ -786,7 +808,9 @@
+             (pcontext->videoIn->formatIn == V4L2_PIX_FMT_RGB24) ||
+             (pcontext->videoIn->formatIn == V4L2_PIX_FMT_RGB565) ) {
+                 DBG("compressing frame from input: %d\n", (int)pcontext->id);
++                t_b = stats_on ? now_us() : 0;
+                 pglobal->in[pcontext->id].size = compress_image_to_jpeg(pcontext->videoIn, pglobal->in[pcontext->id].buf, pcontext->videoIn->framesizeIn, quality);
++                if (stats_on) st_comp += now_us() - t_b;
+                 /* copy this frame's timestamp to user space */
+                 pglobal->in[pcontext->id].timestamp = pcontext->videoIn->tmptimestamp;
+             } else {
+@@ -810,6 +834,15 @@
+             /* signal fresh_frame */
+             pthread_cond_broadcast(&pglobal->in[pcontext->id].db_update);
+             pthread_mutex_unlock(&pglobal->in[pcontext->id].db);
++            if (stats_on) {
++                st_done++;
++                if (now_us() - st_t0 >= 5000000LL) {
++                    int n = st_done ? st_done : 1;
++                    IPRINT("stats: %.1f fps out, grabbed=%d, avg select wait %lld ms, lock wait %lld ms, compress %lld ms\n",
++                           st_done * 1e6 / (double)(now_us() - st_t0), st_grab, st_sel / n / 1000, st_lock / n / 1000, st_comp / n / 1000);
++                    st_t0 = now_us(); st_sel = st_lock = st_comp = 0; st_grab = st_done = 0;
++                }
++            }
+         }
+ 
+ other_select_handlers:
+--- a/plugins/input_uvc/jpeg_utils.c
++++ b/plugins/input_uvc/jpeg_utils.c
+@@ -128,6 +128,8 @@
+ 
+ /* Fast YUYV path: hand YCbCr 4:2:0 planes straight to libjpeg (raw_data_in),
+  * skipping the per-pixel YUV->RGB->YCbCr round trip. */
++int jpeg_sw_rot180 = 0;
++
+ static int compress_yuyv_fast(struct vdIn *vd, unsigned char *buffer, int size, int quality)
+ {
+     struct jpeg_compress_struct cinfo;
+@@ -168,18 +170,25 @@
+         for (i = 0; i < 16; i++) {
+             int sy = y0 + i; const unsigned char *s; unsigned char *d = yr[i];
+             if (sy >= h) sy = h - 1;
++            if (jpeg_sw_rot180) sy = h - 1 - sy;
+             s = yuyv + (size_t)sy * w * 2;
+-            for (x = 0; x < cw; x++) { d[2*x] = s[4*x]; d[2*x+1] = s[4*x+2]; }
++            if (jpeg_sw_rot180) {
++                for (x = 0; x < cw; x++) { const unsigned char *q = s + 4 * (cw - 1 - x); d[2*x] = q[2]; d[2*x+1] = q[0]; }
++            } else {
++                for (x = 0; x < cw; x++) { d[2*x] = s[4*x]; d[2*x+1] = s[4*x+2]; }
++            }
+             for (x = w; x < wp; x++) d[x] = d[w - 1];
+         }
+         for (i = 0; i < 8; i++) {
+             int sy0 = y0 + 2*i, sy1 = sy0 + 1; const unsigned char *s0, *s1;
+             if (sy0 >= h) sy0 = h - 1;
+             if (sy1 >= h) sy1 = h - 1;
++            if (jpeg_sw_rot180) { sy0 = h - 1 - sy0; sy1 = h - 1 - sy1; }
+             s0 = yuyv + (size_t)sy0 * w * 2; s1 = yuyv + (size_t)sy1 * w * 2;
+             for (x = 0; x < cw; x++) {
+-                cbr[i][x] = (s0[4*x+1] + s1[4*x+1] + 1) >> 1;
+-                crr[i][x] = (s0[4*x+3] + s1[4*x+3] + 1) >> 1;
++                int sx = jpeg_sw_rot180 ? cw - 1 - x : x;
++                cbr[i][x] = (s0[4*sx+1] + s1[4*sx+1] + 1) >> 1;
++                crr[i][x] = (s0[4*sx+3] + s1[4*sx+3] + 1) >> 1;
+             }
+             for (x = cw; x < cwp; x++) { cbr[i][x] = cbr[i][cw - 1]; crr[i][x] = crr[i][cw - 1]; }
+         }
+--- a/plugins/input_uvc/jpeg_utils.h
++++ b/plugins/input_uvc/jpeg_utils.h
+@@ -1 +1,3 @@
+ int compress_image_to_jpeg(struct vdIn *vd, unsigned char *buffer, int size, int quality);
++
++extern int jpeg_sw_rot180;
+--- a/plugins/output_http/httpd.c
++++ b/plugins/output_http/httpd.c
+@@ -36,6 +36,7 @@
+ #include <netdb.h>
+ #include <errno.h>
+ #include <limits.h>
++#include <time.h>
+ 
+ #include <linux/version.h>
+ #include <linux/types.h>          /* for videodev2.h */
+@@ -477,11 +478,19 @@
+ 
+     DBG("Headers send, sending stream now\n");
+ 
++    int stats_on = getenv("MJPG_STATS") != NULL;
++    struct timespec ts0, ts1, tss;
++    long long o_t0 = 0, o_wait = 0, o_write = 0; int o_n = 0;
++    clock_gettime(CLOCK_MONOTONIC, &ts0); o_t0 = ts0.tv_sec * 1000000LL + ts0.tv_nsec / 1000;
++
+     while(!pglobal->stop) {
+ 
+         /* wait for fresh frames */
++        clock_gettime(CLOCK_MONOTONIC, &tss);
+         pthread_mutex_lock(&pglobal->in[input_number].db);
+         pthread_cond_wait(&pglobal->in[input_number].db_update, &pglobal->in[input_number].db);
++        clock_gettime(CLOCK_MONOTONIC, &ts1);
++        o_wait += (ts1.tv_sec - tss.tv_sec) * 1000000LL + (ts1.tv_nsec - tss.tv_nsec) / 1000;
+ 
+         /* read buffer */
+         frame_size = pglobal->in[input_number].size;
+@@ -531,6 +540,18 @@
+         DBG("sending boundary\n");
+         sprintf(buffer, "\r\n--" BOUNDARY "\r\n");
+         if(write(context_fd->fd, buffer, strlen(buffer)) < 0) break;
++
++        if (stats_on) {
++            long long nowv;
++            clock_gettime(CLOCK_MONOTONIC, &ts0); nowv = ts0.tv_sec * 1000000LL + ts0.tv_nsec / 1000;
++            o_write += (ts0.tv_sec - ts1.tv_sec) * 1000000LL + (ts0.tv_nsec - ts1.tv_nsec) / 1000;
++            o_n++;
++            if (nowv - o_t0 >= 5000000LL) {
++                OPRINT("stats: client got %.1f fps, avg wait for frame %lld ms, avg send %lld ms\n",
++                       o_n * 1e6 / (double)(nowv - o_t0), o_wait / o_n / 1000, o_write / o_n / 1000);
++                o_t0 = nowv; o_wait = o_write = 0; o_n = 0;
++            }
++        }
+     }
+ 
+     free(frame);
